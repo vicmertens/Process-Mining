@@ -9,4 +9,7 @@ In this example there are onlky timestamps for the completion of each activity.
 processmining2.Rmd is analyzing production data which has start and completion time stamps.
 In that case we can look at the duration of each step.
 
+For both examples the input files as well as the resulting html markdown document are included in this post.
+
+
  
