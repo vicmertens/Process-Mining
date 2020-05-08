@@ -1,0 +1,367 @@
+---
+title: "Process Mining using the R bupaR package"
+author: "Vic Mertens"
+date: "5-5-2020"
+output: html_document
+---
+
+```{r setup, include=FALSE, eval=TRUE}
+
+
+version_date <- lubridate::ymd("2020-03-11")
+
+knitr::opts_chunk$set(echo = TRUE, cache=FALSE, eval=TRUE,
+                      tidy.opts=list(width.cutoff=60),
+                      tidy=FALSE)
+```
+
+## Process Mining
+
+Process mining is the art of discovering, monitoring, and improving processes by extracting knowledge from event logs available in information systems.
+Process mining results in knowledge about real processes followed in an organization that might be helpfull when resolving process bottlenecks or when checking if processes are compliant.
+
+bupaR is an R package that allows to perform process mining activities in R.
+At the end of this page you can find more details about bupaR.
+
+An example of process mining is shown below.   
+We start loading the necesssary libraries into R and by reading the log file (which is in an excel format for this example):
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(bupaR)
+library(openxlsx)
+library(processanimateR)
+library(heuristicsmineR)
+library(petrinetR)
+library(lubridate)
+library(tictoc)
+library(knitr)
+library(pheatmap)
+library(maditr)
+library(viridis)
+library(forcats)
+
+# start timer
+tic("Time to complete")
+
+# setup section:
+filename<-"requisitions.xlsx"
+
+# Read in a fresh file?
+read_file<-TRUE
+
+# filter setup
+
+
+# Read file if required
+if (read_file) {
+eventlog<-read.xlsx(filename,sheet=1,detectDates=TRUE,colNames=TRUE)
+
+eventlog$TimeStamp<-as.POSIXct(eventlog$TimeStamp, tz = "", format="%d/%m/%y %H:%M:%OS" ,
+           tryFormats = c("%Y-%m-%d %H:%M:%OS",
+                          "%Y/%m/%d %H:%M:%OS",
+                          "%d/%m/%Y %H:%M:%OS",
+                          "%Y-%m-%d %H:%M",
+                          "%Y/%m/%d %H:%M",
+                          "%Y-%m-%d",
+                          "%Y/%m/%d"),
+           optional = FALSE)
+}
+eventlog$dow<-weekdays(as.Date(eventlog$TimeStamp))
+eventlog<-eventlog[!is.na(eventlog$CaseID),]
+eventlog$dow <- ordered(eventlog$dow, levels=c("maandag", "dinsdag", "woensdag", "donderdag", 
+ "vrijdag", "zaterdag", "zondag"))
+
+
+eventlog <- eventlog %>%  
+  mutate(dow = fct_recode(dow,
+    "Monday" = "maandag",
+    "Tuesday" = "dinsdag",
+    "Wednesday" = "woensdag",
+    "Thursday" = "donderdag",
+    "Friday" = "vrijdag",
+    "Saturday" = "zaterdag",
+    "Sunday" = "zondag"
+  )) 
+
+```
+
+### The log file read in looks as follows (first 10 lines shown):  
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+
+kable(eventlog[1:10,])
+
+print(paste("Number of records read in from the log file: ",nrow(eventlog),sep=""))
+
+```
+
+### The log file is converted to an eventlog object:  
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+
+
+# convert data frame into an eventlog object
+# activity_instance is set equal to the row number
+
+evLog<-eventlog %>%
+  mutate(activity_instance = 1:nrow(.)) %>%
+  eventlog(
+    case_id = "CaseID",
+    activity_id = "Activity",
+    lifecycle_id = "status",
+    activity_instance_id = "activity_instance",
+    timestamp = "TimeStamp",
+    resource_id = "Approver"
+  )
+
+```
+
+### For this example we select only records with a date in 2014 and we keep only complete cycles (from start to end):
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# filter on year
+evLog<-evLog[evLog$Year==2014,]
+
+# filter on begin and end activities
+evLog <- evLog %>%
+  filter_endpoints(start_activities = c("Create REQ","Create REQ Line"), end_activities = c("Create PO","Create PO Line"))
+
+print(paste("Number of records remaining after filtering: ",nrow(evLog),sep=""))
+
+```
+
+
+### Some statistics about our event log extract:
+
+- mapping used from log file to event log:
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# overview of the mapping used
+mapp<-evLog %>% mapping()
+kable(as.data.frame(mapp))
+
+```
+
+- activities found in the event log:
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# overview of the different activities
+mapp<-evLog %>% activity_labels()
+kable(as.data.frame(mapp))
+
+```
+
+- frequency of the activities as found in the event log:
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# overview of the mapping used
+mapp<-evLog %>% activities()
+kable(as.data.frame(mapp))
+
+```
+
+- activity duration:
+
+Note: In below table the durations are all 0 because the log file used does only contain timestamps for the completion of the activities. If both start and end of activities are logged the durations can be calculated.
+That information can also be used to calculate resource utilisation and resource idle times.
+
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# overview of the mapping used
+mapp<-evLog %>% processing_time("activity",units="mins")
+kable(as.data.frame(mapp))
+
+```
+
+
+- Resource activity
+
+The below table is indicating how many of the activities are carried out by each resource.
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+mapp<-evLog %>% resource_frequency("resource") 
+kable(as.data.frame(mapp))
+```
+
+
+
+- Heatmap of activities:  
+
+using a heatmap we can check if certain activities are executed more on a specific day in the week:
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+
+week_activity <- eventlog %>% 
+  group_by(Activity, dow) %>%
+  summarise(Freq = n())
+week_activity<-week_activity[complete.cases(week_activity),]
+
+p <- ggplot(week_activity, aes(dow, Activity)) + geom_tile(aes(fill = log(Freq)), colour = "white") +
+  labs(x="Weekday",y="Activity") +
+  scale_fill_viridis()
+
+png(file="heatmap.png",width=1500,height=750)
+p
+dev.off()
+include_graphics("heatmap.png")
+
+
+```
+
+
+### Dependency Matrix:
+
+(threshold is set to 0.5, covering half of the activities in the log)
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# dependency matrix with threshold
+dependency_matrix(evLog, threshold = .5) %>% render_dependency_matrix()
+```
+
+### Causal net:
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# causal net with threshold
+causal_net(evLog, threshold = .5) %>% render_causal_net()
+```
+
+### Precedence Matrix:  
+
+Preceeding activities are found in the rows. The numbers are the number of times an activity in the top row is preceeded by an activity in the first column.
+
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# Efficient precedence matrix
+m <- precedence_matrix_absolute(evLog)
+kable(as.matrix(m))
+```
+
+### Process maps:  
+
+(in below maps 90% of the activities are covered, this percentage can be set to avoid showing lesss frequent cases)  
+
+- Relative
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+evLog <- evLog %>% filter_activity_frequency(percentage=0.9)
+
+evLog %>%
+  process_map(type = frequency("relative"), threshold=0.5)
+
+```
+
+- Absolute
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+
+evLog %>%
+  process_map(type = frequency("absolute"), threshold=0.5)
+
+```
+
+- Relative - case
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+evLog %>%
+  process_map(type = frequency("relative_case", color_scale = "Purples"), threshold=0.5)
+
+```
+
+- Performance (median, days)
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+evLog %>%
+  process_map(performance(median, "days"), threshold=0.5)
+
+```
+
+- Performance (mean, hours)
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+evLog %>%
+  process_map(performance(mean, "hours"), threshold=0.5)
+
+```
+
+- Performance (edges) and relative frequency (nodes)
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+evLog %>%
+  process_map(type_nodes = frequency("relative_case"),
+              type_edges = performance(mean), threshold=0.5)
+```
+
+- Trace Explorer  
+
+In below diagram the coverage was set to 80% of all cases
+
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+
+evLog2<-evLog
+
+evLog2 %>%
+  trace_explorer(coverage=0.8) -> traces
+png(file="traces.png",width=1000)
+traces
+dev.off()
+include_graphics("traces.png")
+```
+
+- Filtering on trace frequency
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+
+evLog<-evLog %>%
+  # filter_activity(c("LacticAcid", "CRP", "Leucocytes", "Return ER", "IV Liquid", "IV Antibiotics"), reverse = T) %>%
+  filter_trace_frequency(percentage = 0.8)
+
+```
+
+- Dotted Chart  
+
+The following chart only displays all cases fully contained in a 2 weeks period.
+It is possible to show cases starting in that one month period, all cases completed in that time interval, or all cases showing some activity iin an4 time interval.
+
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+
+evLog %>%  
+  filter_time_period(interval = ymd(c("20140107", "20140121")),filter_method = "contained") %>%
+  dotted_chart
+
+```
+
+- Animated Log  
+
+Using an animated log the cases in the log can be re-played on the process map. The example illustrates this can be very useful when looking for bottlenecks in the process. 
+The process looks simpler in below model as we are only using 90% of the log (based on relative occurrence in the log).
+
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+
+# animate log on process map
+animate_process(evLog %>% filter_trace_frequency(percentage = 0.9),
+               mode = "relative",
+               legend = "CaseId",
+               mapping = token_aes(color = token_scale("amount",
+                                                       scale = "linear",
+                                                       range = c("yellow","red"))))
+```
+
+Stopping the timer:
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+
+# stop timer
+toc()
+
+```
+
+
+### Credits:
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+citation("processmapR")
+```
